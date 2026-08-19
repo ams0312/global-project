@@ -1,0 +1,14 @@
+Patient_ID,Date,Is_First_Ever_Record,Is_New_To_Database
+P1,202401,True,False
+P2,202401,True,False
+P3,202605,True,False
+P4,202605,True,False
+P5,202605,True,False
+P6,202605,True,False
+P7,202410,True,False
+P9,202605,True,False
+P10,202410,True,False
+P11,202605,False,False
+P12,202410,True,False
+P13,202401,False,True
+P14,202401,False,False
