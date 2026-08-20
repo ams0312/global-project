@@ -835,6 +835,20 @@ WITH ClassHistory AS (
         )                                                           AS LastMonthClass
     FROM ClassDom_HQ_Diab c
 ),
+-- [Fix v0.95] Vertica rejects a correlated subquery in the SELECT list
+-- of a query that has GROUP BY (error 4818) unless the subquery is part
+-- of the GROUP BY -- BaseSOB below already has to GROUP BY (for the
+-- MIN(ih.InsulinDate) aggregate), so the EXISTS subquery this used to be
+-- doesn't fly there. Precomputed here instead as a plain per-(patient,
+-- month) aggregate and LEFT JOINed into BaseSOB: if a patient has 2+
+-- distinct active drug classes in a month, then whichever one BaseSOB's
+-- row is for, there is necessarily at least one OTHER active class that
+-- month -- same result as the EXISTS check, just expressed as a join.
+ClassCountByMonth AS (
+    SELECT MasterPatientID, Month, COUNT(DISTINCT DrugClass) AS NumActiveClasses
+    FROM ClassDom_HQ_Diab
+    GROUP BY MasterPatientID, Month
+),
 BaseSOB AS (
     SELECT
         ch.Month, ch.MasterPatientID, ch.DrugClass, ch.Regimen,
@@ -849,14 +863,9 @@ BaseSOB AS (
             ELSE 0
         END                                                         AS IsInsulinNaive,
         DATEDIFF('month', dbe.DBEntryDate, ch.Month)               AS MonthsObservable,
-        -- [Fix v0.94] replaces INSTR(PresentCombo,BeforeCombo) -- see the
-        -- Step 11 header comment above for why that broke.
-        CASE WHEN EXISTS (
-            SELECT 1 FROM ClassDom_HQ_Diab cur
-            WHERE cur.MasterPatientID = ch.MasterPatientID
-              AND cur.Month           = ch.Month
-              AND cur.DrugClass      <> ch.DrugClass
-        ) THEN 1 ELSE 0 END                                         AS HasOtherActiveClassThisMonth
+        -- [Fix v0.94, adjusted v0.95] replaces INSTR(PresentCombo,BeforeCombo)
+        -- -- see the Step 11 header comment above for why that broke.
+        CASE WHEN ccm.NumActiveClasses > 1 THEN 1 ELSE 0 END        AS HasOtherActiveClassThisMonth
     FROM ClassHistory ch
     JOIN PatientComboLag_HQ_Diab pcl
         ON  ch.Month           = pcl.Month
@@ -866,12 +875,15 @@ BaseSOB AS (
     LEFT JOIN InsulinHistory_HQ_Diab ih
         ON  ih.MasterPatientID = ch.MasterPatientID
         AND ih.InsulinDate     < CAST(ch.Month AS DATE) - 14
+    LEFT JOIN ClassCountByMonth ccm
+        ON  ccm.MasterPatientID = ch.MasterPatientID
+        AND ccm.Month           = ch.Month
     GROUP BY
         ch.Month, ch.MasterPatientID, ch.DrugClass, ch.Regimen,
         ch.BrandName, ch.ProductStrength, ch.HCPMasterID,
         pcl.PresentCombo, pcl.BeforeCombo,
         ch.LastBrand, ch.LastMonthClass, pcl.LastMonthAny,
-        dbe.DBEntryDate
+        dbe.DBEntryDate, ccm.NumActiveClasses
 ),
 WithGap AS (
     SELECT *,
