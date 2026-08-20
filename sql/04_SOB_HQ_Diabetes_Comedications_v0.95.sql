@@ -192,9 +192,17 @@ FROM (
         -- join on the already-normalized BrandName without depending on a Vertica
         -- LATERAL join, which this script does not otherwise rely on.
         SELECT
-            p.MasterProductID, p.ATCLevel5Code, p.ATCLevel5Name,
+            -- [Fix v0.95] ATCLevel5Code/ATCLevel5Name and DrugClassName are NOT
+            -- DimProductMaster columns -- v0.93 always referenced all three of
+            -- them unqualified (unlike BrandName/GenericIngredientName/
+            -- StrengthCode/FormCode/MasterProductID, which it always qualified
+            -- as p.___). Qualifying DrugClassName as p.DrugClassName broke
+            -- Drugs_HQ_Diab with "Column p.DrugClassName does not exist";
+            -- ATCLevel5Code/ATCLevel5Name were the same risk, fixed here too
+            -- before it could throw the same error one column later.
+            p.MasterProductID, ATCLevel5Code, ATCLevel5Name,
             p.FormCode, p.StrengthCode,
-            BTRIM(p.DrugClassName)                                  AS DrugClassNameTrim,
+            BTRIM(DrugClassName)                                    AS DrugClassNameTrim,
             CASE
                 WHEN p.BrandName ILIKE '%ACTRAPID%'                     THEN 'ACTRAPID'
                 WHEN p.BrandName ILIKE '%APIDRA%'                       THEN 'APIDRA'
@@ -269,8 +277,8 @@ FROM (
         JOIN vISRDbatchItems b474
             ON  p.MasterProductID = b474.MasterProductID
             AND b474.ISRDBatchID  = ${ISRDBatchID2}$
-        WHERE BTRIM(p.DrugClassName) NOT IN ('','Not Applicable')
-          AND p.DrugClassName IS NOT NULL
+        WHERE BTRIM(DrugClassName) NOT IN ('','Not Applicable')
+          AND DrugClassName IS NOT NULL
     ) norm
     -- [Fix v0.94] single canonical brand -> Regimen lookup. OAD (driven by
     -- DrugClassName, not brand) is handled separately via the COALESCE above,
