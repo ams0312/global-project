@@ -1,6 +1,17 @@
 ---------------------------------------Diabetes and Obesity Cardiometabolic Global Project------------------------------------------------
 -------Analysis 2b_HQ -------------------------HQ_DIABETES SOB--------------------------------------------------------------------------------
--- VERSION: v0.94
+-- VERSION: v0.95
+-- CHANGES FROM v0.94:
+-- [New] Step 22b/24b/25 NEW : Monotherapy view added alongside the existing
+--                      co-medication view, per NN request. Metric='7_MonoUse',
+--                      Category='Monotherapy', Before='TOTAL', Present=the
+--                      focus brand itself. Sourced the same way as
+--                      co-medication (on-drug patients from
+--                      ClassDomDisplay_HQ_Diab) but as the exact complement
+--                      of the "has co-medication" filter: patients with NO
+--                      other active drug class that month. Rides the same
+--                      05_CoMedications_HQ_Diabetes.csv export as the
+--                      co-medication rows, distinguished by Metric/Category.
 -- CHANGES FROM v0.93 (internal v0.6):
 -- [Fix] Step 1  CHG : batch 453 pull extended to OZEMPIC + MOUNJARO (previously
 --                      WEGOVY only) -- obesity-batch Rx for these two brands was
@@ -2010,7 +2021,7 @@ ORDER BY Date, Regimen, Focus_Brand, Category, Specialty;
 
 
 -- ============================================================
--- CO-MEDICATION ANALYSIS (Analysis 6_CoUse)
+-- CO-MEDICATION ANALYSIS (Analysis 6_CoUse) + MONOTHERAPY (7_MonoUse)
 -- Methodology per Shubham (German HQ team):
 -- For each patient-month, identify the focus brand (dominant
 -- brand per class) and all OTHER concurrent drugs in that month.
@@ -2025,6 +2036,20 @@ ORDER BY Date, Regimen, Focus_Brand, Category, Specialty;
 --   Category       = 'Comedication'
 --   Before         = 'TOTAL'
 --   Present        = co-medication combo (focus brand excluded)
+--
+-- [NEW v0.95] NN request: alongside co-medication, also report
+-- Monotherapy -- on-drug patients with NO co-medication at all
+-- that month (the exact complement of the co-medication filter).
+-- Same on-drug scope and same source table, so it's a natural
+-- companion view, not a separate analysis:
+--   Metric         = '7_MonoUse'
+--   Category_short = 'Monotherapy'
+--   Category_long  = 'Monotherapy'
+--   Category       = 'Monotherapy'
+--   Before         = 'TOTAL'
+--   Present        = the focus brand itself (nothing else to show)
+-- Built in Steps 22b/24b below and unioned into the same export as
+-- co-medication (Step 25) so both views land in the same wave/file.
 -- ============================================================
 
 -- ============================================================
@@ -2121,6 +2146,40 @@ FROM CoMedCombo cc
 WHERE NULLIF(cc.CoMedCombo,'') IS NOT NULL
 ;
 SELECT ANALYZE_STATISTICS('CoMed_HQ_Diab_Base');
+
+-- ============================================================
+-- STEP 22b: MONOTHERAPY BASE  [NEW v0.95]
+-- NN request: alongside the co-medication view (patients with at
+-- least one OTHER concurrent drug class), also surface a
+-- monotherapy view -- patients who are on exactly ONE drug class
+-- that month, i.e. the exact complement of CoMed_HQ_Diab_Base's
+-- "at least one co-medication" filter. Same source
+-- (ClassDomDisplay_HQ_Diab, so already indication-aware for
+-- Ozempic/Mounjaro/Wegovy and already scoped to on-drug patients
+-- the same way the co-medication view is), same "on drug" scope,
+-- just the opposite NOT EXISTS condition.
+-- ============================================================
+DROP TABLE IF EXISTS MonoUse_HQ_Diab_Base;
+CREATE LOCAL TEMP TABLE MonoUse_HQ_Diab_Base ON COMMIT PRESERVE ROWS AS
+SELECT
+    c.Month,
+    c.MasterPatientID,
+    c.DrugClass                                                     AS FocusDrugClass,
+    c.Regimen                                                       AS FocusRegimen,
+    c.BrandName                                                     AS FocusBrand,
+    c.DisplayNameStrength                                           AS FocusDisplayName,
+    c.HCPMasterID
+FROM ClassDomDisplay_HQ_Diab c
+WHERE c.Month >= DATE('${sDate}$')
+  -- No other active drug class this month -- true monotherapy.
+  AND NOT EXISTS (
+      SELECT 1 FROM ClassDom_HQ_Diab cur
+      WHERE cur.MasterPatientID = c.MasterPatientID
+        AND cur.Month           = c.Month
+        AND cur.DrugClass      <> c.DrugClass
+  )
+;
+SELECT ANALYZE_STATISTICS('MonoUse_HQ_Diab_Base');
 
 -- ============================================================
 -- STEP 23: CO-MEDICATION REGIMEN COMBOS
@@ -2228,22 +2287,124 @@ GROUP BY 1
 ORDER BY 1;
 
 -- ============================================================
--- STEP 25: ADD PROJECTION TO CO-MEDICATION
+-- STEP 24b: MONOTHERAPY FINAL OUTPUT  [NEW v0.95]
+-- Same shape as CoMed_HQ_Diab (Step 24) so it can ride the same
+-- export: Metric='7_MonoUse', Category='Monotherapy', Before=
+-- 'TOTAL', Present = the focus brand itself (there is nothing else
+-- to show -- that's what makes it monotherapy). Present_Basal/
+-- Bolus/MNIAD reuse RegimenCombo_HQ_Diab exactly like CoMed does;
+-- for a monotherapy patient only the bucket matching their own
+-- class will be populated, the other two come back empty.
+-- ============================================================
+DROP TABLE IF EXISTS MonoUse_HQ_Diab;
+CREATE LOCAL TEMP TABLE MonoUse_HQ_Diab ON COMMIT PRESERVE ROWS AS
+
+-- Specialty rows
+SELECT
+    'AU'                                                            AS Country,
+    CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER)                     AS Date,
+    'All'                                                           AS Region,
+    '7_MonoUse'                                                     AS Metric,
+    NVL(pt.PatientType, 'T2D')                                      AS Type,
+    'Monotherapy'                                                   AS Category_short,
+    'Monotherapy'                                                   AS Category_long,
+    'Monotherapy'                                                   AS Category,
+    mb.FocusRegimen                                                 AS Regimen,
+    mb.FocusDisplayName                                             AS Focus_Brand,
+    'TOTAL'                                                         AS Before,
+    mb.FocusDisplayName                                             AS Present,
+    NULL                                                            AS Before_Basal,
+    NULLIF(rc.BasalCombo,'')                                        AS Present_Basal,
+    NULL                                                            AS Before_Bolus,
+    NULLIF(rc.BolusCombo,'')                                        AS Present_Bolus,
+    NULL                                                            AS Before_MNIAD,
+    NULLIF(rc.MNIADCombo,'')                                        AS Present_MNIAD,
+    NVL(d.Specialty,'Others')                                       AS Specialty,
+    'Pat'                                                           AS Count,
+    COUNT(DISTINCT mb.MasterPatientID)                              AS LRx_Panel
+FROM MonoUse_HQ_Diab_Base mb
+LEFT JOIN PatientType_HQ_Diab pt  ON mb.MasterPatientID = pt.MasterPatientID
+LEFT JOIN RegimenCombo_HQ_Diab rc
+    ON  mb.Month           = rc.Month
+    AND mb.MasterPatientID = rc.MasterPatientID
+LEFT JOIN Docs_HQ_Diab d ON mb.HCPMasterID = d.HCPMasterID
+GROUP BY
+    CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
+    NVL(pt.PatientType,'T2D'),
+    mb.FocusRegimen, mb.FocusDisplayName,
+    NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,''),
+    NVL(d.Specialty,'Others')
+
+UNION ALL
+
+-- TOTAL rows
+SELECT
+    'AU',
+    CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
+    'All', '7_MonoUse',
+    NVL(pt.PatientType, 'T2D'),
+    'Monotherapy','Monotherapy','Monotherapy',
+    mb.FocusRegimen,
+    mb.FocusDisplayName,
+    'TOTAL',
+    mb.FocusDisplayName,
+    NULL,
+    NULLIF(rc.BasalCombo,''),
+    NULL,
+    NULLIF(rc.BolusCombo,''),
+    NULL,
+    NULLIF(rc.MNIADCombo,''),
+    'TOTAL',
+    'Pat',
+    COUNT(DISTINCT mb.MasterPatientID)
+FROM MonoUse_HQ_Diab_Base mb
+LEFT JOIN PatientType_HQ_Diab pt  ON mb.MasterPatientID = pt.MasterPatientID
+LEFT JOIN RegimenCombo_HQ_Diab rc
+    ON  mb.Month           = rc.Month
+    AND mb.MasterPatientID = rc.MasterPatientID
+GROUP BY
+    CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
+    NVL(pt.PatientType,'T2D'),
+    mb.FocusRegimen, mb.FocusDisplayName,
+    NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,'')
+;
+SELECT ANALYZE_STATISTICS('MonoUse_HQ_Diab');
+
+-- Sense check
+SELECT
+    Date,
+    COUNT(*)                                                        AS Rows,
+    SUM(LRx_Panel)                                                  AS TotalPats
+FROM MonoUse_HQ_Diab
+WHERE Specialty = 'TOTAL'
+GROUP BY 1
+ORDER BY 1;
+
+-- ============================================================
+-- STEP 25: ADD PROJECTION TO CO-MEDICATION + MONOTHERAPY
 -- Join ProjectionFactors on Date = effectiveMonth
 -- LRx_Projected = FLOOR(LRx_Panel × Factor)
+-- [Fix v0.95] Monotherapy rows unioned in here so both views ride
+-- the same export file, distinguished by Metric ('6_CoUse' vs
+-- '7_MonoUse') and Category ('Comedication' vs 'Monotherapy').
 -- ============================================================
 DROP TABLE IF EXISTS CoMed_HQ_Diab_Projected;
 CREATE LOCAL TEMP TABLE CoMed_HQ_Diab_Projected ON COMMIT PRESERVE ROWS AS
 SELECT
     c.*,
     CAST(FLOOR(c.LRx_Panel * pf.Factor) AS INTEGER)                AS LRx_Projected
-FROM CoMed_HQ_Diab c
+FROM (
+    SELECT * FROM CoMed_HQ_Diab
+    UNION ALL
+    SELECT * FROM MonoUse_HQ_Diab
+) c
 LEFT JOIN ProjectionFactors_HQ_Diab pf
     ON  c.Date = pf.effectiveMonth;
 
 -- ============================================================
--- EXPORT CO-MEDICATION
+-- EXPORT CO-MEDICATION + MONOTHERAPY
 -- [Fix v0.94] UPPER() on every text column, explicit comma delimiter.
+-- [Fix v0.95] Now also carries the Monotherapy rows (see Step 25).
 -- ============================================================
 @export on;
 @export set filename="${OutputPath}$\${dbvis-date||||||format=[yyyy-MM-dd]}$ 05_CoMedications_HQ_Diabetes.csv"
