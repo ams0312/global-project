@@ -1,6 +1,59 @@
 ---------------------------------------Diabetes and Obesity Cardiometabolic Global Project------------------------------------------------
 -------Analysis 2b_HQ -------------------------HQ_DIABETES SOB--------------------------------------------------------------------------------
--- VERSION: v0.95
+-- VERSION: v0.96
+-- CHANGES FROM v0.95:
+-- [Fix] Step 1  CHG : ATCLevel5Code/ATCLevel5Name/DrugClassName reverted to
+--                      unqualified (not p.___) in the brand-normalization
+--                      subquery -- they resolve from vISRDbatchItems, not
+--                      DimProductMaster p; qualifying DrugClassName as
+--                      p.DrugClassName broke Drugs_HQ_Diab with "Column
+--                      p.DrugClassName does not exist".
+-- [Fix] Step 11 CHG : the EXISTS(...) subquery added in v0.94 to fix Add-on
+--                      detection sat in the SELECT list of a query that also
+--                      has GROUP BY, which Vertica rejects (error 4818, "not
+--                      supported if the subquery is not part of the GROUP
+--                      BY"). Replaced with a precomputed ClassCountByMonth
+--                      CTE (COUNT(DISTINCT DrugClass) per patient/month, no
+--                      correlation) LEFT JOINed in instead of a correlated
+--                      subquery -- same result, GROUP BY-safe.
+-- [Fix] Step 11 CHG : "Repeat patient doesn't have focus brand in Before" --
+--                      a SEPARATE bug from the Add-on/Win misclassification
+--                      fixed in v0.94. SOB_Category is decided from a
+--                      per-class LAG(BrandName) that bridges gaps (a patient
+--                      who dropped a brand for a couple of months and came
+--                      back is correctly Repeat), but the displayed Before
+--                      combo came from a different, calendar-adjacent LAG
+--                      (literally last calendar month) which, during that
+--                      gap, never contained the brand at all -- so a gap-
+--                      bridged Repeat row's Category was right and its
+--                      Before was wrong. Before is now sourced from the
+--                      combo at the patient's actual last active month IN
+--                      THAT CLASS (LastMonthClass) when one exists, falling
+--                      back to the calendar-adjacent combo only for Add-on/
+--                      naive rows (which have no class history to anchor to
+--                      by definition).
+-- [Fix] Step 20/21/25 : "202407 (or any month) patient count all blank" --
+--                      that symptom (an entire month blank across every
+--                      row) is the signature of ProjectionFactors_HQ_Diab
+--                      having no row for that effectiveMonth, nulling out
+--                      LRx_Projected via the LEFT JOIN. Added a diagnostic
+--                      query listing exactly which Date(s) are missing a
+--                      Factor (fix the projection CSV itself for those), and
+--                      changed the join to NVL(pf.Factor, 1) so a missing
+--                      month falls back to the unprojected count instead of
+--                      going blank.
+-- [Open] Type/Indication naming -- flagged for the call, not changed here:
+--                      current output shows T1D/T2D/OBESITY (OBESITY added
+--                      in v0.94 for the newly-included obesity-flagged
+--                      patients). You mentioned wanting this to read
+--                      "Diabetes/Obesity/Unknown" (or whatever v0.93
+--                      presented) instead -- but v0.93's own Step 8 already
+--                      hardcoded T1D/T2D specifically (Yipeng's requirement
+--                      per the code comments), never "Diabetes"/"Obesity",
+--                      and had no explicit Unknown bucket (unflagged
+--                      patients silently defaulted to T2D). Need the exact
+--                      label set you want before changing this -- see
+--                      question asked separately.
 -- CHANGES FROM v0.94:
 -- [New] Step 22b/24b/25 NEW : Monotherapy view added alongside the existing
 --                      co-medication view, per NN request. Metric='7_MonoUse',
@@ -854,7 +907,22 @@ BaseSOB AS (
         ch.Month, ch.MasterPatientID, ch.DrugClass, ch.Regimen,
         ch.BrandName, ch.ProductStrength, ch.HCPMasterID,
         pcl.PresentCombo,
-        pcl.BeforeCombo,
+        -- [Fix v0.96] "Repeat patient doesn't have focus brand in Before":
+        -- LastBrand/LastMonthClass (above) use a per-class LAG that bridges
+        -- gaps -- a patient who dropped LANTUS for a couple of months then
+        -- came back is correctly Repeat (gap bridged, per the confirmed
+        -- methodology). But pcl.BeforeCombo is a DIFFERENT, calendar-
+        -- adjacent LAG (literally last calendar month's combo) -- during
+        -- that gap it never contained LANTUS at all, so a gap-bridged
+        -- Repeat row's Before was silently missing the focus brand even
+        -- though the category was right. When LastMonthClass exists (Win/
+        -- Repeat), source Before from the combo AT that gap-bridged month
+        -- instead -- consistent with what LastBrand/Category are actually
+        -- based on. Add-on/naive rows have no LastMonthClass (first time in
+        -- this class), so they correctly keep falling back to the
+        -- calendar-adjacent pcl.BeforeCombo, which is what "did the patient
+        -- have any other therapy last month" should mean for them.
+        COALESCE(bc_lastclass.CurrentCombo, pcl.BeforeCombo)        AS BeforeCombo,
         ch.LastBrand, ch.LastMonthClass, pcl.LastMonthAny,
         -- [Octavian] IsInsulinNaive via LEFT JOIN + MIN.
         -- If no insulin exists before Month-14 ? MIN IS NULL ? naive=1
@@ -878,10 +946,13 @@ BaseSOB AS (
     LEFT JOIN ClassCountByMonth ccm
         ON  ccm.MasterPatientID = ch.MasterPatientID
         AND ccm.Month           = ch.Month
+    LEFT JOIN BrandCombo_HQ_Diab bc_lastclass
+        ON  bc_lastclass.MasterPatientID = ch.MasterPatientID
+        AND bc_lastclass.Month           = ch.LastMonthClass
     GROUP BY
         ch.Month, ch.MasterPatientID, ch.DrugClass, ch.Regimen,
         ch.BrandName, ch.ProductStrength, ch.HCPMasterID,
-        pcl.PresentCombo, pcl.BeforeCombo,
+        pcl.PresentCombo, pcl.BeforeCombo, bc_lastclass.CurrentCombo,
         ch.LastBrand, ch.LastMonthClass, pcl.LastMonthAny,
         dbe.DBEntryDate, ccm.NumActiveClasses
 ),
@@ -1984,15 +2055,36 @@ DELIMITER ',' SKIP 1;
 
 -- Verify all 25 months loaded
 SELECT * FROM ProjectionFactors_HQ_Diab ORDER BY effectiveMonth;
+
+-- [NEW v0.96] "202407 (or any month) patient count all blank" is the
+-- exact symptom of this LEFT JOIN not finding a Factor for that month --
+-- every row for a month missing from ProjectionFactors_HQ_Diab used to
+-- come out NULL. Run this first: it lists every Date present in
+-- SOB_HQ_Diabetes that has NO matching row in ProjectionFactors_HQ_Diab.
+-- If 202407 (sDate's month) shows up here, the projection factors CSV
+-- itself needs that month added -- that's a data file fix, not a SQL fix.
+SELECT DISTINCT s.Date
+FROM SOB_HQ_Diabetes s
+LEFT JOIN ProjectionFactors_HQ_Diab pf ON s.Date = pf.effectiveMonth
+WHERE pf.effectiveMonth IS NULL
+ORDER BY 1;
+
 -- ============================================================
 -- STEP 21: FINAL OUTPUT WITH PROJECTIONS
 -- LRx_Projected = LRx_Panel × Factor, no decimal places
+-- [Fix v0.96] NVL(pf.Factor, 1) -- a month missing from the projection
+-- factors CSV no longer blanks the whole month out; it now falls back to
+-- the unprojected LRx_Panel count (Factor=1, i.e. no projection applied)
+-- so the row is still there and visibly usable. This does not fix a
+-- missing row in the CSV itself -- use the diagnostic query above to find
+-- and add it -- it just stops one missing lookup row from silently
+-- nulling out an entire month's worth of counts.
 -- ============================================================
 DROP TABLE IF EXISTS SOB_HQ_Diabetes_Projected;
 CREATE LOCAL TEMP TABLE SOB_HQ_Diabetes_Projected ON COMMIT PRESERVE ROWS AS
 SELECT
     s.*,
-    CAST(FLOOR(s.LRx_Panel * pf.Factor) AS INTEGER)                AS LRx_Projected
+    CAST(FLOOR(s.LRx_Panel * NVL(pf.Factor, 1)) AS INTEGER)        AS LRx_Projected
 FROM SOB_HQ_Diabetes s
 LEFT JOIN ProjectionFactors_HQ_Diab pf
     ON  s.Date = pf.effectiveMonth;
@@ -2407,12 +2499,14 @@ ORDER BY 1;
 -- [Fix v0.95] Monotherapy rows unioned in here so both views ride
 -- the same export file, distinguished by Metric ('6_CoUse' vs
 -- '7_MonoUse') and Category ('Comedication' vs 'Monotherapy').
+-- [Fix v0.96] NVL(pf.Factor, 1) -- same fallback as Step 21, see that
+-- comment for why.
 -- ============================================================
 DROP TABLE IF EXISTS CoMed_HQ_Diab_Projected;
 CREATE LOCAL TEMP TABLE CoMed_HQ_Diab_Projected ON COMMIT PRESERVE ROWS AS
 SELECT
     c.*,
-    CAST(FLOOR(c.LRx_Panel * pf.Factor) AS INTEGER)                AS LRx_Projected
+    CAST(FLOOR(c.LRx_Panel * NVL(pf.Factor, 1)) AS INTEGER)        AS LRx_Projected
 FROM (
     SELECT * FROM CoMed_HQ_Diab
     UNION ALL
