@@ -1,6 +1,19 @@
 ---------------------------------------Diabetes and Obesity Cardiometabolic Global Project------------------------------------------------
 -------Analysis 2b_HQ -------------------------HQ_DIABETES SOB--------------------------------------------------------------------------------
--- VERSION: v0.96
+-- VERSION: v0.97
+-- CHANGES FROM v0.96:
+-- [Fix] Step 8 CHG : Type/Indication naming resolved per your call answer
+--                      (DIABETES / OBESITY / UNKNOWN). PatientType now
+--                      collapses T1/T2 into one DIABETES value directly
+--                      (was T1D/T2D), and every downstream
+--                      NVL(pt.PatientType, 'T2D') default changed to
+--                      NVL(pt.PatientType, 'UNKNOWN') -- a patient with no
+--                      matching flag at all is now genuinely UNKNOWN
+--                      instead of being silently mislabeled T2D. This also
+--                      simplified every Ozempic/Mounjaro indication-suffix
+--                      CASE (Steps 6b/18) down to a plain
+--                      NVL(pt.PatientType,'UNKNOWN'), since PatientType now
+--                      already holds the exact display value.
 -- CHANGES FROM v0.95:
 -- [Fix] Step 1  CHG : ATCLevel5Code/ATCLevel5Name/DrugClassName reverted to
 --                      unqualified (not p.___) in the brand-normalization
@@ -42,18 +55,6 @@
 --                      changed the join to NVL(pf.Factor, 1) so a missing
 --                      month falls back to the unprojected count instead of
 --                      going blank.
--- [Open] Type/Indication naming -- flagged for the call, not changed here:
---                      current output shows T1D/T2D/OBESITY (OBESITY added
---                      in v0.94 for the newly-included obesity-flagged
---                      patients). You mentioned wanting this to read
---                      "Diabetes/Obesity/Unknown" (or whatever v0.93
---                      presented) instead -- but v0.93's own Step 8 already
---                      hardcoded T1D/T2D specifically (Yipeng's requirement
---                      per the code comments), never "Diabetes"/"Obesity",
---                      and had no explicit Unknown bucket (unflagged
---                      patients silently defaulted to T2D). Need the exact
---                      label set you want before changing this -- see
---                      question asked separately.
 -- CHANGES FROM v0.94:
 -- [New] Step 22b/24b/25 NEW : Monotherapy view added alongside the existing
 --                      co-medication view, per NN request. Metric='7_MonoUse',
@@ -452,15 +453,22 @@ SELECT ANALYZE_STATISTICS('PatientFlag_HQ_Diab');
 
 
 -- ============================================================
--- Type column should show T1D/T2D/OBESITY split.
+-- Type column should show DIABETES/OBESITY/UNKNOWN split.
 -- Source: ISRDPatientFlag – same table as Step 1b.
--- PatientFlag = 'T1' ? Type = 'T1D'
--- PatientFlag = 'T2' ? Type = 'T2D'
--- PatientFlag = 'Obesity' ? Type = 'OBESITY'
+-- PatientFlag = 'T1' or 'T2' ? Type = 'DIABETES'
+-- PatientFlag = 'Obesity'    ? Type = 'OBESITY'
+-- No matching flag at all    ? Type = 'UNKNOWN' (via NVL(pt.PatientType,
+--   'UNKNOWN') wherever this table is LEFT JOINed downstream)
 -- ============================================================
 -- ============================================================
 -- STEP 8: PATIENT TYPE CLASSIFICATION
--- [Yipeng] Type column = T1D/T2D/OBESITY from ISRDPatientFlag.
+-- [Yipeng] Type column = T1D/T2D from ISRDPatientFlag (v0.93 original
+-- requirement). [Fix v0.96] Per your call request, collapsed T1/T2 into
+-- one DIABETES value (keeping the T1D/T2D split elsewhere isn't needed
+-- for this column) and every downstream NVL(pt.PatientType, 'UNKNOWN')
+-- default changed to NVL(pt.PatientType, 'UNKNOWN') -- a patient with no
+-- matching flag at all is now genuinely UNKNOWN instead of being
+-- silently mislabeled DIABETES/T2D.
 -- [FIX] A patient can appear in both batch 474 (diabetes) and
 -- batch 453 (obesity). Without deduplication this would produce
 -- two PatientType rows per patient causing double counting in
@@ -468,24 +476,18 @@ SELECT ANALYZE_STATISTICS('PatientFlag_HQ_Diab');
 -- Fix: take one row per patient using batch 474 (diabetes) as
 -- priority. If a patient only appears in batch 453 they are
 -- included only if flagged T1/T2/Obesity.
--- [Fix v0.94] Obesity branch added -- this was previously falling
--- through to the ELSE 'T2D' default, which is exactly why
--- Ozempic/Mounjaro/Wegovy obesity usage showed Type=T1D/T2D
--- ("it is a bit weird to see focus=Ozempic obesity, indication is
--- T1D/T2D. Same for Wegovy").
 -- ============================================================
 DROP TABLE IF EXISTS PatientType_HQ_Diab;
 CREATE LOCAL TEMP TABLE PatientType_HQ_Diab ON COMMIT PRESERVE ROWS AS
 SELECT DISTINCT
     MasterPatientID,
-    -- Take the T1D/T2D/OBESITY label – same for a given patient across batches
+    -- Take the DIABETES/OBESITY label – same for a given patient across batches
     -- DISTINCT on MasterPatientID + PatientType handles deduplication
     -- for patients who appear in both batch 474 and 453 with same flag
     CASE
-        WHEN PatientFlag = 'T1'      THEN 'T1D'
-        WHEN PatientFlag = 'T2'      THEN 'T2D'
-        WHEN PatientFlag = 'Obesity' THEN 'OBESITY'
-        ELSE 'T2D'
+        WHEN PatientFlag IN ('T1','T2') THEN 'DIABETES'
+        WHEN PatientFlag = 'Obesity'    THEN 'OBESITY'
+        ELSE 'UNKNOWN'
     END                                                             AS PatientType
 FROM factISRDPatientFlag
 WHERE ISRDBatchID IN (${ISRDBatchID2}$, ${ISRDBatchID1}$)
@@ -694,12 +696,12 @@ SELECT ANALYZE_STATISTICS('ClassDom_HQ_Diab');
 -- ClassDom row so Steps 7, 16, 18 and 22 all build Before/
 -- Present/Focus_Brand from the same source instead of repeating
 -- this CASE four times and risking drift between them.
--- OZEMPIC/MOUNJARO -> "<ProductStrength> DIABETES" or "... OBESITY"
---   from the patient's own PatientType (T1D/T2D -> Diabetes,
---   Obesity -> Obesity).
+-- OZEMPIC/MOUNJARO -> "<ProductStrength> DIABETES" or "... OBESITY",
+--   taken directly from the patient's own PatientType (T1/T2 flag ->
+--   DIABETES, Obesity flag -> OBESITY, no matching flag -> UNKNOWN).
 -- WEGOVY -> always "... OBESITY", regardless of which flag the
 --   prescribing patient carries -- Wegovy is clinically obesity-
---   only, and showing T1D/T2D next to it was the reported bug.
+--   only, and showing a diabetes flag next to it was the reported bug.
 -- Everything else: unchanged (GLP-1 non-indication-aware brands
 --   keep ProductStrength as before; non-GLP-1 keeps BrandName).
 -- ============================================================
@@ -711,7 +713,7 @@ SELECT
     CASE
         WHEN c.Regimen = 'GLP-1' AND c.BrandName IN ('OZEMPIC','MOUNJARO')
         THEN c.ProductStrength || ' ' ||
-             CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+             NVL(pt.PatientType,'UNKNOWN')
         WHEN c.Regimen = 'GLP-1' AND c.BrandName = 'WEGOVY'
         THEN c.ProductStrength || ' OBESITY'
         WHEN c.Regimen = 'GLP-1'
@@ -721,7 +723,7 @@ SELECT
     CASE
         WHEN c.BrandName IN ('OZEMPIC','MOUNJARO')
         THEN c.BrandName || ' ' ||
-             CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+             NVL(pt.PatientType,'UNKNOWN')
         WHEN c.BrandName = 'WEGOVY'
         THEN c.BrandName || ' OBESITY'
         ELSE c.BrandName
@@ -768,7 +770,7 @@ FROM Ranked
 SELECT ANALYZE_STATISTICS('BrandCombo_HQ_Diab');
 
 -- ============================================================
--- STEP 8: T1D / T2D / OBESITY – see Step 8 above (PatientType).
+-- STEP 8: DIABETES / OBESITY / UNKNOWN – see Step 8 above (PatientType).
 -- Type column now comes from PatientType_HQ_Diab, not hardcoded.
 -- ============================================================
 
@@ -1383,12 +1385,12 @@ SELECT
     CAST(TO_CHAR(s.Month,'YYYYMM') AS INTEGER)                      AS Date,
     'All'                                                           AS Region,
     '4_SoB'                                                         AS Metric,
-    NVL(pt.PatientType, 'T2D')                                      AS Type,
+    NVL(pt.PatientType, 'UNKNOWN')                                      AS Type,
     s.SOB_Category                                                  AS Category,
     s.Regimen,
     -- Strength level: GLP-1 uses the indication-aware display name
     CASE WHEN s.Regimen = 'GLP-1' AND s.BrandName IN ('OZEMPIC','MOUNJARO')
-         THEN s.ProductStrength || ' ' || CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+         THEN s.ProductStrength || ' ' || NVL(pt.PatientType,'UNKNOWN')
          WHEN s.Regimen = 'GLP-1' AND s.BrandName = 'WEGOVY'
          THEN s.ProductStrength || ' OBESITY'
          WHEN s.Regimen = 'GLP-1' THEN s.ProductStrength
@@ -1425,7 +1427,7 @@ LEFT JOIN Docs_HQ_Diab d ON s.HCPMasterID = d.HCPMasterID
 WHERE s.Month >= DATE('${sDate}$')
   AND s.SOB_Category IN ('Treatment naive first','Treatment naive','New to database',
                           'Insulin naive','Add on','Win','Repeat')
-  AND NOT (s.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'T2D') = 'OBESITY'
+  AND NOT (s.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'UNKNOWN') = 'OBESITY'
            AND s.Month < DATE('2026-05-01'))
 
 UNION ALL
@@ -1442,7 +1444,7 @@ SELECT
     CAST(TO_CHAR(s.Month,'YYYYMM') AS INTEGER)                      AS Date,
     'All'                                                           AS Region,
     '4_SoB'                                                         AS Metric,
-    NVL(pt.PatientType, 'T2D')                                      AS Type,
+    NVL(pt.PatientType, 'UNKNOWN')                                      AS Type,
     -- [Yipeng] Brand-level SOB category:
     -- If LastBrand = BrandName at brand level ? Repeat
     -- (covers DULAGLUTIDE_0p75 ? DULAGLUTIDE_1p5 = Repeat)
@@ -1469,7 +1471,7 @@ SELECT
     -- (was bare BrandName -- Ozempic Diabetes and Ozempic Obesity used
     -- to collapse into one "OZEMPIC" total row at this level).
     CASE WHEN s.BrandName IN ('OZEMPIC','MOUNJARO')
-         THEN s.BrandName || ' ' || CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+         THEN s.BrandName || ' ' || NVL(pt.PatientType,'UNKNOWN')
          WHEN s.BrandName = 'WEGOVY'
          THEN s.BrandName || ' OBESITY'
          ELSE s.BrandName END                                       AS Focus_Brand,
@@ -1506,7 +1508,7 @@ WHERE s.Month >= DATE('${sDate}$')
   AND s.Regimen = 'GLP-1'                                          -- GLP-1 only
   AND s.SOB_Category IN ('Treatment naive first','Treatment naive','New to database',
                           'Insulin naive','Add on','Win','Repeat')
-  AND NOT (s.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'T2D') = 'OBESITY'
+  AND NOT (s.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'UNKNOWN') = 'OBESITY'
            AND s.Month < DATE('2026-05-01'))
 
 UNION ALL
@@ -1515,7 +1517,7 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(s.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'T2D'),
+    NVL(pt.PatientType, 'UNKNOWN'),
     'Insulin naive', s.Regimen,
     CASE WHEN s.Regimen = 'GLP-1' THEN s.ProductStrength
          ELSE s.BrandName END,
@@ -1545,10 +1547,10 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(l.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'T2D'),
+    NVL(pt.PatientType, 'UNKNOWN'),
     'Lose', l.Regimen,
     CASE WHEN l.LastBrand IN ('OZEMPIC','MOUNJARO')
-         THEN l.LastBrand || ' ' || CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+         THEN l.LastBrand || ' ' || NVL(pt.PatientType,'UNKNOWN')
          WHEN l.LastBrand = 'WEGOVY'
          THEN l.LastBrand || ' OBESITY'
          ELSE l.LastBrand END                                       AS Focus_Brand,
@@ -1577,7 +1579,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc_bef
     AND rc_bef.Month           = lam.LastMonth
 LEFT JOIN Docs_HQ_Diab doc ON l.HCPMasterID = doc.HCPMasterID
 WHERE l.Month >= DATE('${sDate}$')
-  AND NOT (l.LastBrand = 'MOUNJARO' AND NVL(pt.PatientType,'T2D') = 'OBESITY'
+  AND NOT (l.LastBrand = 'MOUNJARO' AND NVL(pt.PatientType,'UNKNOWN') = 'OBESITY'
            AND l.Month < DATE('2026-05-01'))
 
 UNION ALL
@@ -1588,10 +1590,10 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(d.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'T2D'),
+    NVL(pt.PatientType, 'UNKNOWN'),
     'Drop off', d.Regimen,
     CASE WHEN d.LastBrand IN ('OZEMPIC','MOUNJARO')
-         THEN d.LastBrand || ' ' || CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+         THEN d.LastBrand || ' ' || NVL(pt.PatientType,'UNKNOWN')
          WHEN d.LastBrand = 'WEGOVY'
          THEN d.LastBrand || ' OBESITY'
          ELSE d.LastBrand END                                       AS Focus_Brand,
@@ -1610,7 +1612,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc_bef
     AND rc_bef.Month           = lam.LastMonth
 LEFT JOIN Docs_HQ_Diab doc ON d.HCPMasterID = doc.HCPMasterID
 WHERE d.Month >= DATE('${sDate}$')
-  AND NOT (d.LastBrand = 'MOUNJARO' AND NVL(pt.PatientType,'T2D') = 'OBESITY'
+  AND NOT (d.LastBrand = 'MOUNJARO' AND NVL(pt.PatientType,'UNKNOWN') = 'OBESITY'
            AND d.Month < DATE('2026-05-01'))
 
 UNION ALL
@@ -1620,10 +1622,10 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(od.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'T2D'),
+    NVL(pt.PatientType, 'UNKNOWN'),
     'Off drug', od.Regimen,
     CASE WHEN od.BrandName IN ('OZEMPIC','MOUNJARO')
-         THEN od.BrandName || ' ' || CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+         THEN od.BrandName || ' ' || NVL(pt.PatientType,'UNKNOWN')
          WHEN od.BrandName = 'WEGOVY'
          THEN od.BrandName || ' OBESITY'
          ELSE od.BrandName END                                      AS Focus_Brand,
@@ -1634,7 +1636,7 @@ FROM OffDrug_HQ_Diab od
 LEFT JOIN PatientType_HQ_Diab pt  ON od.MasterPatientID = pt.MasterPatientID
 LEFT JOIN Docs_HQ_Diab doc ON od.HCPMasterID = doc.HCPMasterID
 WHERE od.Month >= DATE('${sDate}$')
-  AND NOT (od.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'T2D') = 'OBESITY'
+  AND NOT (od.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'UNKNOWN') = 'OBESITY'
            AND od.Month < DATE('2026-05-01'))
 
 UNION ALL
@@ -1644,10 +1646,10 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(e.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'T2D'),
+    NVL(pt.PatientType, 'UNKNOWN'),
     'End', e.Regimen,
     CASE WHEN e.BrandName IN ('OZEMPIC','MOUNJARO')
-         THEN e.BrandName || ' ' || CASE WHEN NVL(pt.PatientType,'T2D') = 'OBESITY' THEN 'OBESITY' ELSE 'DIABETES' END
+         THEN e.BrandName || ' ' || NVL(pt.PatientType,'UNKNOWN')
          WHEN e.BrandName = 'WEGOVY'
          THEN e.BrandName || ' OBESITY'
          ELSE e.BrandName END                                       AS Focus_Brand,
@@ -1658,7 +1660,7 @@ FROM End_HQ_Diab e
 LEFT JOIN PatientType_HQ_Diab pt  ON e.MasterPatientID = pt.MasterPatientID
 LEFT JOIN Docs_HQ_Diab doc ON e.HCPMasterID = doc.HCPMasterID
 WHERE e.Month >= DATE('${sDate}$')
-  AND NOT (e.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'T2D') = 'OBESITY'
+  AND NOT (e.BrandName = 'MOUNJARO' AND NVL(pt.PatientType,'UNKNOWN') = 'OBESITY'
            AND e.Month < DATE('2026-05-01'))
 ;
 SELECT ANALYZE_STATISTICS('SOB_HQ_Diabetes_Base');
@@ -2318,7 +2320,7 @@ SELECT
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER)                     AS Date,
     'All'                                                           AS Region,
     '6_CoUse'                                                       AS Metric,
-    NVL(pt.PatientType, 'T2D')                                      AS Type,
+    NVL(pt.PatientType, 'UNKNOWN')                                      AS Type,
     'Comedication'                                                  AS Category_short,
     'Comedication'                                                  AS Category_long,
     'Comedication'                                                  AS Category,
@@ -2348,7 +2350,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
 LEFT JOIN Docs_HQ_Diab d ON cb.HCPMasterID = d.HCPMasterID
 GROUP BY
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'T2D'),
+    NVL(pt.PatientType,'UNKNOWN'),
     cb.FocusRegimen, cb.FocusDisplayName, cb.CoMedCombo,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,''),
     NVL(d.Specialty,'Others')
@@ -2360,7 +2362,7 @@ SELECT
     'AU',
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER),
     'All', '6_CoUse',
-    NVL(pt.PatientType, 'T2D'),
+    NVL(pt.PatientType, 'UNKNOWN'),
     'Comedication','Comedication','Comedication',
     cb.FocusRegimen,
     cb.FocusDisplayName,
@@ -2382,7 +2384,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
     AND cb.MasterPatientID = rc.MasterPatientID
 GROUP BY
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'T2D'),
+    NVL(pt.PatientType,'UNKNOWN'),
     cb.FocusRegimen, cb.FocusDisplayName, cb.CoMedCombo,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,'')
 ;
@@ -2417,7 +2419,7 @@ SELECT
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER)                     AS Date,
     'All'                                                           AS Region,
     '7_MonoUse'                                                     AS Metric,
-    NVL(pt.PatientType, 'T2D')                                      AS Type,
+    NVL(pt.PatientType, 'UNKNOWN')                                      AS Type,
     'Monotherapy'                                                   AS Category_short,
     'Monotherapy'                                                   AS Category_long,
     'Monotherapy'                                                   AS Category,
@@ -2442,7 +2444,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
 LEFT JOIN Docs_HQ_Diab d ON mb.HCPMasterID = d.HCPMasterID
 GROUP BY
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'T2D'),
+    NVL(pt.PatientType,'UNKNOWN'),
     mb.FocusRegimen, mb.FocusDisplayName,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,''),
     NVL(d.Specialty,'Others')
@@ -2454,7 +2456,7 @@ SELECT
     'AU',
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
     'All', '7_MonoUse',
-    NVL(pt.PatientType, 'T2D'),
+    NVL(pt.PatientType, 'UNKNOWN'),
     'Monotherapy','Monotherapy','Monotherapy',
     mb.FocusRegimen,
     mb.FocusDisplayName,
@@ -2476,7 +2478,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
     AND mb.MasterPatientID = rc.MasterPatientID
 GROUP BY
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'T2D'),
+    NVL(pt.PatientType,'UNKNOWN'),
     mb.FocusRegimen, mb.FocusDisplayName,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,'')
 ;
