@@ -1,6 +1,23 @@
 ---------------------------------------Diabetes and Obesity Cardiometabolic Global Project------------------------------------------------
 -------Analysis 2b_HQ -------------------------HQ_DIABETES SOB--------------------------------------------------------------------------------
--- VERSION: v0.98
+-- VERSION: v0.99
+-- CHANGES FROM v0.98:
+-- [Fix] Steps 18/24/24b CHG : per Yipeng's decision on the Type/
+--                      Indication question -- Type now only reflects the
+--                      patient's own flag (DIABETES/OBESITY/UNKNOWN) on
+--                      GLP-1 rows (Ozempic/Mounjaro/Wegovy). Every other
+--                      regimen (Basal/Bolus/Premix Insulin, OAD, SGLT_2,
+--                      DPP_IV) now ALWAYS shows DIABETES, regardless of
+--                      the patient's underlying flag -- identical to
+--                      what every past wave already showed, since those
+--                      rows could only ever be Diabetes before Obesity-
+--                      flagged patients were in scope at all. Applied
+--                      uniformly across every category block: strength-
+--                      level, Insulin naive (forced DIABETES directly,
+--                      it's never GLP-1), Lose, Drop off, Off drug, End,
+--                      and both CoMed/MonoUse outputs (keyed off
+--                      FocusRegimen). The brand-level GLP-1 block needed
+--                      no change -- it's already filtered to GLP-1 only.
 -- CHANGES FROM v0.97:
 -- [Fix] Step 11 CHG : Yipeng -- "Ozempic repeat patients don't have
 --                      Ozempic in Before". Root cause: LastBrand is
@@ -1432,7 +1449,12 @@ SELECT
     CAST(TO_CHAR(s.Month,'YYYYMM') AS INTEGER)                      AS Date,
     'All'                                                           AS Region,
     '4_SoB'                                                         AS Metric,
-    NVL(pt.PatientType, 'UNKNOWN')                                      AS Type,
+    -- [Fix v0.99] Type only reflects the patient's own flag on GLP-1
+    -- rows -- everywhere else it's forced to DIABETES, matching exactly
+    -- what past waves always showed (those rows could only ever be
+    -- Diabetes before Obesity-flagged patients were in scope at all).
+    CASE WHEN s.Regimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END                                       AS Type,
     s.SOB_Category                                                  AS Category,
     s.Regimen,
     -- Strength level: GLP-1 uses the indication-aware display name
@@ -1561,10 +1583,12 @@ WHERE s.Month >= DATE('${sDate}$')
 UNION ALL
 
 -- Insulin naive sub-category (strength level – unchanged, never GLP-1)
+-- [Fix v0.99] Regimen here is always an insulin class, never GLP-1, so
+-- Type is always DIABETES -- matches past waves exactly.
 SELECT
     'AU', CAST(TO_CHAR(s.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'UNKNOWN'),
+    'DIABETES',
     'Insulin naive', s.Regimen,
     CASE WHEN s.Regimen = 'GLP-1' THEN s.ProductStrength
          ELSE s.BrandName END,
@@ -1594,7 +1618,10 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(l.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'UNKNOWN'),
+    -- [Fix v0.99] Type only reflects the patient's flag when the
+    -- dropped class was GLP-1; everything else forces DIABETES.
+    CASE WHEN l.Regimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END,
     'Lose', l.Regimen,
     CASE WHEN l.LastBrand IN ('OZEMPIC','MOUNJARO')
          THEN l.LastBrand || ' ' || NVL(pt.PatientType,'UNKNOWN')
@@ -1637,7 +1664,9 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(d.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'UNKNOWN'),
+    -- [Fix v0.99] same GLP-1-only override as everywhere else.
+    CASE WHEN d.Regimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END,
     'Drop off', d.Regimen,
     CASE WHEN d.LastBrand IN ('OZEMPIC','MOUNJARO')
          THEN d.LastBrand || ' ' || NVL(pt.PatientType,'UNKNOWN')
@@ -1669,7 +1698,9 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(od.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'UNKNOWN'),
+    -- [Fix v0.99] same GLP-1-only override as everywhere else.
+    CASE WHEN od.Regimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END,
     'Off drug', od.Regimen,
     CASE WHEN od.BrandName IN ('OZEMPIC','MOUNJARO')
          THEN od.BrandName || ' ' || NVL(pt.PatientType,'UNKNOWN')
@@ -1693,7 +1724,9 @@ UNION ALL
 SELECT
     'AU', CAST(TO_CHAR(e.Month,'YYYYMM') AS INTEGER),
     'All','4_SoB',
-    NVL(pt.PatientType, 'UNKNOWN'),
+    -- [Fix v0.99] same GLP-1-only override as everywhere else.
+    CASE WHEN e.Regimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END,
     'End', e.Regimen,
     CASE WHEN e.BrandName IN ('OZEMPIC','MOUNJARO')
          THEN e.BrandName || ' ' || NVL(pt.PatientType,'UNKNOWN')
@@ -2367,7 +2400,9 @@ SELECT
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER)                     AS Date,
     'All'                                                           AS Region,
     '6_CoUse'                                                       AS Metric,
-    NVL(pt.PatientType, 'UNKNOWN')                                      AS Type,
+    -- [Fix v0.99] same GLP-1-only override as the main SOB output.
+    CASE WHEN cb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END                                       AS Type,
     'Comedication'                                                  AS Category_short,
     'Comedication'                                                  AS Category_long,
     'Comedication'                                                  AS Category,
@@ -2397,7 +2432,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
 LEFT JOIN Docs_HQ_Diab d ON cb.HCPMasterID = d.HCPMasterID
 GROUP BY
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'UNKNOWN'),
+    CASE WHEN cb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType,'UNKNOWN') ELSE 'DIABETES' END,
     cb.FocusRegimen, cb.FocusDisplayName, cb.CoMedCombo,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,''),
     NVL(d.Specialty,'Others')
@@ -2409,7 +2444,8 @@ SELECT
     'AU',
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER),
     'All', '6_CoUse',
-    NVL(pt.PatientType, 'UNKNOWN'),
+    CASE WHEN cb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END,
     'Comedication','Comedication','Comedication',
     cb.FocusRegimen,
     cb.FocusDisplayName,
@@ -2431,7 +2467,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
     AND cb.MasterPatientID = rc.MasterPatientID
 GROUP BY
     CAST(TO_CHAR(cb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'UNKNOWN'),
+    CASE WHEN cb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType,'UNKNOWN') ELSE 'DIABETES' END,
     cb.FocusRegimen, cb.FocusDisplayName, cb.CoMedCombo,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,'')
 ;
@@ -2466,7 +2502,9 @@ SELECT
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER)                     AS Date,
     'All'                                                           AS Region,
     '7_MonoUse'                                                     AS Metric,
-    NVL(pt.PatientType, 'UNKNOWN')                                      AS Type,
+    -- [Fix v0.99] same GLP-1-only override as the main SOB output.
+    CASE WHEN mb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END                                       AS Type,
     'Monotherapy'                                                   AS Category_short,
     'Monotherapy'                                                   AS Category_long,
     'Monotherapy'                                                   AS Category,
@@ -2491,7 +2529,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
 LEFT JOIN Docs_HQ_Diab d ON mb.HCPMasterID = d.HCPMasterID
 GROUP BY
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'UNKNOWN'),
+    CASE WHEN mb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType,'UNKNOWN') ELSE 'DIABETES' END,
     mb.FocusRegimen, mb.FocusDisplayName,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,''),
     NVL(d.Specialty,'Others')
@@ -2503,7 +2541,8 @@ SELECT
     'AU',
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
     'All', '7_MonoUse',
-    NVL(pt.PatientType, 'UNKNOWN'),
+    CASE WHEN mb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType, 'UNKNOWN')
+         ELSE 'DIABETES' END,
     'Monotherapy','Monotherapy','Monotherapy',
     mb.FocusRegimen,
     mb.FocusDisplayName,
@@ -2525,7 +2564,7 @@ LEFT JOIN RegimenCombo_HQ_Diab rc
     AND mb.MasterPatientID = rc.MasterPatientID
 GROUP BY
     CAST(TO_CHAR(mb.Month,'YYYYMM') AS INTEGER),
-    NVL(pt.PatientType,'UNKNOWN'),
+    CASE WHEN mb.FocusRegimen = 'GLP-1' THEN NVL(pt.PatientType,'UNKNOWN') ELSE 'DIABETES' END,
     mb.FocusRegimen, mb.FocusDisplayName,
     NULLIF(rc.BasalCombo,''), NULLIF(rc.BolusCombo,''), NULLIF(rc.MNIADCombo,'')
 ;
