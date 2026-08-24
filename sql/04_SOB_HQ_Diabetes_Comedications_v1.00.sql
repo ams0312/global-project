@@ -1,6 +1,15 @@
 ---------------------------------------Diabetes and Obesity Cardiometabolic Global Project------------------------------------------------
 -------Analysis 2b_HQ -------------------------HQ_DIABETES SOB--------------------------------------------------------------------------------
--- VERSION: v0.99
+-- VERSION: v1.00
+-- CHANGES FROM v0.99:
+-- [New] QC CHECK 7 NEW : whole-dataset diagnostic for "Repeat patients
+--                      don't have the focus brand in Before" -- flags
+--                      any Repeat row, any brand, any month, where
+--                      Before doesn't contain the focus brand's own
+--                      token. Should return zero rows after the v0.96
+--                      (gap-bridged Before) and v0.98 (cross-class Win)
+--                      fixes; run it to confirm rather than trust the
+--                      code alone.
 -- CHANGES FROM v0.98:
 -- [Fix] Steps 18/24/24b CHG : per Yipeng's decision on the Type/
 --                      Indication question -- Type now only reflects the
@@ -2014,6 +2023,27 @@ GROUP BY Country,Date,Region,Metric,Type,Regimen,Focus_Brand,Before,Present
 --WHERE od.Category = 'On drug'
 --ORDER BY ABS(od.LRx_Panel - cat.SumOfCategoryRows) DESC
 --LIMIT 30;
+--
+--
+---- ============================================================
+---- CHECK 7: Repeat rows missing the focus brand in Before
+---- [NEW v0.99] Direct, whole-dataset version of "Ozempic repeat
+---- patients don't have Ozempic in Before" -- run this across every
+---- brand/month/specialty to confirm the v0.96 (gap-bridged Before)
+---- and v0.98 (cross-class Win) fixes actually closed it out, rather
+---- than just trusting the code. Should return ZERO rows. Any row
+---- here is a genuine Repeat where Before doesn't contain the focus
+---- brand's own token -- send those rows back and I'll dig into that
+---- specific case.
+---- ============================================================
+--SELECT
+--    Date, Regimen, Focus_Brand, Before, Present, Specialty
+--FROM SOB_HQ_Diabetes_Projected
+--WHERE Category = 'Repeat'
+--  AND Before IS NOT NULL
+--  AND INSTR(Before, SPLIT_PART(Focus_Brand, ' ', 1)) = 0
+--ORDER BY Date, Regimen, Focus_Brand
+--LIMIT 200;
 --
 --
 ---- Top 20 most common Before/Present combos for Repeat
