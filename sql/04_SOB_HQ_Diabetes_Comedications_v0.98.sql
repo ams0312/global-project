@@ -1,6 +1,26 @@
 ---------------------------------------Diabetes and Obesity Cardiometabolic Global Project------------------------------------------------
 -------Analysis 2b_HQ -------------------------HQ_DIABETES SOB--------------------------------------------------------------------------------
--- VERSION: v0.97
+-- VERSION: v0.98
+-- CHANGES FROM v0.97:
+-- [Fix] Step 11 CHG : Yipeng -- "Ozempic repeat patients don't have
+--                      Ozempic in Before". Root cause: LastBrand is
+--                      scoped PER DRUG CLASS, so a patient's first-ever
+--                      GLP-1 fill always has LastBrand=NULL for that
+--                      class, even when they are plainly switching in
+--                      from a fully-dropped OTHER class (e.g. JARDIANCE,
+--                      an SGLT-2). The old Win branch only fired when
+--                      LastBrand IS NOT NULL (a same-class brand
+--                      switch), so this genuinely cross-class win had
+--                      nowhere to land -- it isn't Add-on either
+--                      (nothing persists this month), so it fell all
+--                      the way through to the 'Repeat' fallback. Before
+--                      then correctly showed the dropped brand
+--                      (JARDIANCE), making it look like "Repeat without
+--                      the focus brand in Before" -- but the real
+--                      problem was the Category, not Before: it should
+--                      have read Win, not Repeat. Added a cross-class
+--                      Win branch (LastBrand IS NULL, had other therapy
+--                      last month, nothing else active this month).
 -- CHANGES FROM v0.96:
 -- [Fix] Step 8 CHG : Type/Indication naming resolved per your call answer
 --                      (DIABETES / OBESITY / UNKNOWN). PatientType now
@@ -1030,9 +1050,36 @@ SELECT
          AND HasOtherActiveClassThisMonth = 1
         THEN 'Add on'
 
+        -- -------------------------------------------------------
+        -- Win (cross-class): patient's FIRST TIME EVER in this class
+        -- (LastBrand IS NULL), they had other active therapy last
+        -- month (BeforeCombo IS NOT NULL), but NOTHING else is active
+        -- THIS month (HasOtherActiveClassThisMonth = 0) -- i.e. that
+        -- other therapy was fully dropped and replaced by this brand.
+        -- [Fix v0.98] Yipeng: "Ozempic repeat patients don't have
+        -- Ozempic in Before" -- traced to this exact gap. LastBrand is
+        -- scoped PER DRUG CLASS, so a patient's first-ever GLP-1 fill
+        -- always has LastBrand=NULL for the GLP-1 class, even when
+        -- they are plainly switching in from a fully-dropped OTHER
+        -- class (e.g. JARDIANCE, an SGLT-2, replaced entirely by
+        -- Ozempic). Win only checked LastBrand IS NOT NULL (a same-
+        -- class brand switch), so this genuinely cross-class win had
+        -- nowhere to land: it isn't Add-on (nothing persists), so it
+        -- fell all the way through to the 'Repeat' fallback below --
+        -- Before then correctly showed the dropped brand (JARDIANCE),
+        -- but the Category was wrong, making it look like "Repeat
+        -- without the focus brand in Before" instead of what it
+        -- actually is: a Win from JARDIANCE.
+        -- -------------------------------------------------------
+        WHEN LastBrand IS NULL
+         AND BeforeCombo IS NOT NULL AND BeforeCombo <> ''
+         AND HasOtherActiveClassThisMonth = 0
+        THEN 'Win'
+
         -- Fallback: Repeat
         -- Covers first-ever month in this class with no prior
-        -- combo (LastBrand IS NULL, BeforeCombo IS NULL)
+        -- combo at all (LastBrand IS NULL, BeforeCombo IS NULL) --
+        -- genuinely nothing to win from, nothing to add on to.
         ELSE 'Repeat'
     END                                                             AS SOB_Category
 FROM WithGap
