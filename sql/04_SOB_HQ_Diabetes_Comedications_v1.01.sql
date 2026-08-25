@@ -1,6 +1,28 @@
 ---------------------------------------Diabetes and Obesity Cardiometabolic Global Project------------------------------------------------
 -------Analysis 2b_HQ -------------------------HQ_DIABETES SOB--------------------------------------------------------------------------------
--- VERSION: v1.00
+-- VERSION: v1.01
+-- CHANGES FROM v1.00:
+-- [Fix] Step 11 CHG : third mechanism found behind "Ozempic/Mounjaro
+--                      repeat patients have blank Before". Traced from
+--                      your CHECK-7 output: every blank-Before row had
+--                      LastBrand=NULL AND DBEntryDate=NULL. These
+--                      patients have zero FactScript history for ANY
+--                      product ever -- the strongest possible signal of
+--                      genuinely new, never-seen-before -- so
+--                      MonthsObservable came out NULL, and NULL >= 12 /
+--                      NULL < 12 both evaluate to unknown, so none of
+--                      the three naive-category branches fired. They
+--                      fell all the way through Repeat/Win/Add-on (all
+--                      of which need a non-null LastBrand or
+--                      BeforeCombo) into the final ELSE 'Repeat'
+--                      fallback -- wrongly, since no observable history
+--                      at all is definitionally Treatment naive first,
+--                      not Repeat. NULL MonthsObservable is now treated
+--                      the same as ">= 12" for the two naive branches
+--                      that mean "long/unknown history"; "New to
+--                      database" is untouched since it specifically
+--                      requires a KNOWN recent entry date, which NULL
+--                      can't claim.
 -- CHANGES FROM v0.99:
 -- [New] QC CHECK 7 NEW : whole-dataset diagnostic for "Repeat patients
 --                      don't have the focus brand in Before" -- flags
@@ -1023,17 +1045,37 @@ SELECT
         -- Naive categories: GapMonthsAny + MonthsObservable only
         -- -------------------------------------------------------
 
+        -- [Fix v1.01] MonthsObservable IS NULL whenever a patient has no
+        -- PatientDBEntry_HQ_Diab row at all -- i.e. FactScript (the
+        -- all-products history table) has NEVER seen them for ANY
+        -- product. That's the single strongest possible signal of
+        -- "brand new, no observable history" -- yet the bare
+        -- ">= 12"/"< 12" comparisons below both evaluate to unknown
+        -- against NULL, so neither branch fired for these patients. They
+        -- fell through Naive, then through Repeat/Win/Add-on (which all
+        -- need a non-null LastBrand or BeforeCombo), landing in the
+        -- final ELSE 'Repeat' fallback -- wrongly, since a patient with
+        -- zero observable history is definitionally naive, not
+        -- repeating. Traced directly from your CHECK-7 output: every
+        -- blank-Before Ozempic/Mounjaro "Repeat" row had LastBrand=NULL
+        -- AND DBEntryDate=NULL. NULL is now treated the same as ">= 12"
+        -- (maximally observable / no evidence of recent entry) in both
+        -- of the first two branches; "New to database" is unaffected --
+        -- it specifically means "we KNOW they entered recently", which a
+        -- NULL DBEntryDate can't claim.
         -- Treatment naive first: no prior diabetes drugs at all
         WHEN GapMonthsAny IS NULL
-         AND MonthsObservable >= 12
+         AND (MonthsObservable IS NULL OR MonthsObservable >= 12)
         THEN 'Treatment naive first'
 
         -- Treatment naive: had diabetes drugs but >= 12m ago
         WHEN GapMonthsAny >= 12
-         AND MonthsObservable >= 12
+         AND (MonthsObservable IS NULL OR MonthsObservable >= 12)
         THEN 'Treatment naive'
 
         -- New to database: no prior or long gap, observable < 12m
+        -- (MonthsObservable IS NULL is deliberately excluded here -- see
+        -- the note above; those patients are naive, not "known recent".)
         WHEN (GapMonthsAny IS NULL OR GapMonthsAny >= 12)
          AND MonthsObservable < 12
         THEN 'New to database'
